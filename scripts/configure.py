@@ -56,6 +56,7 @@ def main() -> None:
     values["WEB_PORT"] = str(port)
     values.setdefault("BIND_ADDRESS", "127.0.0.1")
     values.setdefault("MAX_REVIEWS_PER_DAY", "30")
+    values.setdefault("MAX_MATERIALS_PER_DAY", "30")
     values.setdefault("AI_PRIVATE_HOST_ALLOWLIST", "")
     if args.domain:
         values["PUBLIC_ORIGIN"] = f"https://{args.domain}"
