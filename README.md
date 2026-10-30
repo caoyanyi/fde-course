@@ -65,6 +65,12 @@ docker compose logs --tail=100 app web
 
 如服务器上的 18080 已被占用，配置时加 `--port 18081`，同时修改下面反向代理的目标端口。
 
+### 用 Git tag 自动发布 Docker Hub 镜像
+
+仓库包含 [自动发布工作流](.github/workflows/docker-publish.yml)。在 GitHub 配置 `DOCKERHUB_TOKEN` 后，新建并推送 tag 会自动构建 `caoethan/fde-learning-app` 和 `caoethan/fde-learning-web` 的 `linux/amd64`、`linux/arm64` 镜像。镜像版本保留 Git tag 原名；正式版本在两个镜像都发布成功后更新 `latest`，预发布只更新对应版本。
+
+凭据配置、tag 示例、手动重试和服务器拉取方式见 **[Docker Hub 自动发布说明](docs/DOCKER-PUBLISH.md)**。现有 `1.0` 标签不会因加入工作流自动补推；自动发布的新 tag 应指向包含该工作流的提交。
+
 ### 只在自己的电脑上试用
 
 ```bash

@@ -1,0 +1,161 @@
+name: Publish Docker images
+
+on:
+  push:
+    tags:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing Git tag to publish, for example v1.1.1'
+        required: true
+        type: string
+      update_latest:
+        description: 'Also update latest for a stable version tag'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# Keep releases from updating the two latest tags concurrently.
+concurrency:
+  group: dockerhub-release
+  cancel-in-progress: false
+
+env:
+  APP_IMAGE: caoethan/fde-learning-app
+  WEB_IMAGE: caoethan/fde-learning-web
+
+jobs:
+  publish:
+    name: Build and publish app and web
+    if: github.event_name == 'workflow_dispatch' || github.event.deleted != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Validate release tag
+        id: release
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          PUSH_TAG: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          UPDATE_LATEST: ${{ inputs.update_latest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            RELEASE_TAG="$REQUESTED_TAG"
+          else
+            RELEASE_TAG="$PUSH_TAG"
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || [[ "$RELEASE_TAG" == latest ]]; then
+            echo '::error::Use a Docker-compatible Git tag (up to 128 letters, digits, underscores, dots or hyphens). The name latest is reserved.'
+            exit 1
+          fi
+          publish_latest=false
+          if [[ "$RELEASE_TAG" =~ ^v?[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            if [[ "$EVENT_NAME" == push || "$UPDATE_LATEST" == true ]]; then
+              publish_latest=true
+            fi
+          fi
+          printf 'tag=%s\nlatest=%s\n' "$RELEASE_TAG" "$publish_latest" >> "$GITHUB_OUTPUT"
+
+      - name: Check Docker Hub credential
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "$DOCKERHUB_TOKEN" ]]; then
+            echo '::error::Add the repository Actions secret DOCKERHUB_TOKEN with Docker Hub Repo Read & Write permission for caoethan.'
+            exit 1
+          fi
+
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          persist-credentials: false
+
+      - name: Record source revision
+        id: source
+        shell: bash
+        run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: caoethan
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up ARM emulation
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and push the app version
+        id: app
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/backend.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.APP_IMAGE }}:${{ steps.release.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.tag }}
+          cache-from: type=gha,scope=fde-learning-app
+          cache-to: type=gha,mode=max,scope=fde-learning-app,ignore-error=true
+
+      - name: Build and push the web version
+        id: web
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/web.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.WEB_IMAGE }}:${{ steps.release.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.tag }}
+          cache-from: type=gha,scope=fde-learning-web
+          cache-to: type=gha,mode=max,scope=fde-learning-web,ignore-error=true
+
+      # Only promote after BOTH version images have been published successfully.
+      # Registry tag updates are separate operations; a failed promotion can be rerun.
+      - name: Update latest after both version images succeed
+        if: steps.release.outputs.latest == 'true'
+        env:
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${APP_IMAGE}:latest" "${APP_IMAGE}@${APP_DIGEST}"
+          docker buildx imagetools create --tag "${WEB_IMAGE}:latest" "${WEB_IMAGE}@${WEB_DIGEST}"
+
+      - name: Summarize published images
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          PUBLISHED_LATEST: ${{ steps.release.outputs.latest }}
+        shell: bash
+        run: |
+          {
+            printf '## Docker Hub publication\n\n'
+            printf 'Git tag: `%s`\n\nSource commit: `%s`\n\n' "$RELEASE_TAG" "$SOURCE_SHA"
+            printf '| Image | Digest |\n| --- | --- |\n'
+            printf '| `%s:%s` | `%s` |\n' "$APP_IMAGE" "$RELEASE_TAG" "$APP_DIGEST"
+            printf '| `%s:%s` | `%s` |\n' "$WEB_IMAGE" "$RELEASE_TAG" "$WEB_DIGEST"
+            printf '\nPlatforms: `linux/amd64`, `linux/arm64`.\n\nUpdated `latest`: `%s`.\n' "$PUBLISHED_LATEST"
+          } >> "$GITHUB_STEP_SUMMARY"
