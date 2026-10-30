@@ -1,0 +1,6 @@
+# Replace learn.example.com with your own subdomain.
+# Run Caddy on the host, with public ports 80 and 443 available.
+learn.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:18080
+}

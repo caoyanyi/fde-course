@@ -1,0 +1,11 @@
+{
+  "name": "fde-learning-system",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm --prefix frontend run build",
+    "validate:course": "python3 scripts/validate_course.py"
+  }
+}
