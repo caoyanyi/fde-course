@@ -39,20 +39,20 @@ chmod 600 .env
 
 如果使用 GitHub 自动生成的源码 ZIP，顶层目录名称可能不同；进入包含 `compose.yaml` 的目录即可。
 
-也可以从仓库取得升级分支，替代上面的解压步骤：
+也可以从仓库主干取得新版源码，替代上面的解压步骤：
 
 ```bash
-git clone --branch upgrade/v1.1.0 --single-branch https://github.com/caoyanyi/fde-course.git /opt/fde-releases/v1.1.0/fde-learning-system
+git clone --branch master --single-branch https://github.com/caoyanyi/fde-course.git /opt/fde-releases/v1.1.0/fde-learning-system
 cd /opt/fde-releases/v1.1.0/fde-learning-system
 cp /opt/fde-learning-system/.env .env
 chmod 600 .env
 ```
 
-解压与克隆选择一种即可。目标目录应是新的目录，仓库 `master` 分支保留 v1.0 基线，升级使用 `upgrade/v1.1.0`。
+解压与克隆选择一种即可。目标目录应是新的目录，仓库 `1.0` 标签保留 v1.0 基线，`master` 分支已包含 v1.1；`upgrade/v1.1.0` 分支继续保留。
 
 若原项目名不是 `fde-learning`，在新版 `.env` 中设置 `COMPOSE_PROJECT_NAME=原项目名`。不要修改原密钥、域名或端口。若修改过课程，在此时合并课程内容。
 
-新增配置 `MAX_MATERIALS_PER_DAY` 可不填写，默认全站每天 30 次。已有 `MAX_REVIEWS_PER_DAY` 继续作为全站额度。两者都按 UTC 日统计，在北京时间每天 08:00 重置。
+全站每日评审 `MAX_REVIEWS_PER_DAY` 和素材生成 `MAX_MATERIALS_PER_DAY` 的新默认值均为 100。已有 `.env` 中显式设置的值会继续保留；例如原来写了 30，仅更新源码不会把它改成 100。两者都按 UTC 日统计，在北京时间每天 08:00 重置。完成下面的新版启动与数据库迁移后，可以按“多用户与额度”一节的命令同时调整全站和原管理员额度。
 
 ### 3. 先构建镜像，再停止和备份
 
@@ -97,7 +97,22 @@ curl -fsS http://127.0.0.1:18080/api/health
 
 系统不开放公众自行注册。管理员创建管理员或学习者，设置显示名、状态、每日评审和素材额度，并可以重置密码。停用和重置密码会撤销用户的旧会话。管理员自己的学习页面也只显示自己的学习记录。
 
-新学习者默认每天 10 次评审、5 次素材生成。迁移后的原管理员默认 30 / 30。实际可调用次数同时受全站剩余额度约束；失败任务也计入当日调用额度，因为外部服务可能已经计费。正在运行的外部请求不能保证因账号停用而撤销，尚未开始的任务会在调用前检查账号状态。
+新账号和首次从 v1.0 迁移的原管理员，默认每天可评审 100 次、生成素材 100 次。两个额度分别计算。已有 v1.1 账号保留其现有额度，不会在重启时覆盖你设置的自定义值。实际可调用次数同时受全站剩余额度约束；全站默认的 100 次由所有账号共享。失败任务也计入当日调用额度，因为外部服务可能已经计费。正在运行的外部请求不能保证因账号停用而撤销，尚未开始的任务会在调用前检查账号状态。
+
+### 将已有部署调整为每天 100 次
+
+先完成新版启动及数据库迁移，再在包含 `compose.yaml` 和原 `.env` 的新版代码目录执行：
+
+```bash
+python3 scripts/set_daily_limits.py --limit 100
+docker compose up -d
+```
+
+第一条命令同时将 `.env` 中的两类全站额度和原管理员（`id=1`，仍须为管理员）的两类用户额度设为 100。脚本保留其他账号的额度、原密钥及其他配置，不清空当天已用次数；第二条命令使新的全站环境配置生效。刷新页面后，未使用时会显示 `0 / 100 次`、`全站剩余 100 次`，已经使用的次数继续扣除。
+
+若要选择另一个账号，使用 `python3 scripts/set_daily_limits.py --limit 100 --username 实际用户名`；若确定要统一调整所有已有账号，使用 `python3 scripts/set_daily_limits.py --limit 100 --all-users`。两个选项不能同时使用；无论选择哪个账号，脚本都会更新两类全站额度。
+
+脚本要求当前 Compose 项目已有 `app` 容器，且数据卷内已有迁移完成的 v1.1 数据库。找不到原项目、数据库版本不匹配或目标账号不存在时会停止，不创建数据库、不运行迁移。若原来使用自定义项目名，先确认 `.env` 的 `COMPOSE_PROJECT_NAME` 与原项目一致。每次执行后都需要运行 `docker compose up -d`；已有用量按原来的 UTC 日界限恢复，无需等待次日才能使用新增额度。
 
 AI 设置由管理员管理，学习者共享模型服务，但不会获取 Base URL 或密钥。本版面向你管理的个人及小团队学习使用，没有负载容量验证。
 

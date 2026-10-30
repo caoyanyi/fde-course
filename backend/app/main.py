@@ -82,8 +82,8 @@ class PasswordChange(BaseModel):
 class UserCreate(Credentials):
     display_name: str = Field(default="", max_length=80)
     role: Literal["admin", "learner"] = "learner"
-    review_daily_limit: int = Field(default=10, ge=0, le=1000)
-    material_daily_limit: int = Field(default=5, ge=0, le=1000)
+    review_daily_limit: int = Field(default=100, ge=0, le=1000)
+    material_daily_limit: int = Field(default=100, ge=0, le=1000)
 
 
 class UserUpdate(BaseModel):
@@ -344,7 +344,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM users").fetchone():
                 raise HTTPException(409, "系统已初始化，请登录")
-            conn.execute("INSERT INTO users(id,username,password_hash,created_at,display_name,role,review_daily_limit,material_daily_limit) VALUES (1,?,?,?,?,'admin',30,30)", (payload.username, hash_password(payload.password), now(), payload.username))
+            conn.execute("INSERT INTO users(id,username,password_hash,created_at,display_name,role,review_daily_limit,material_daily_limit) VALUES (1,?,?,?,?,'admin',100,100)", (payload.username, hash_password(payload.password), now(), payload.username))
         limiter.clear(ip_key(request))
         return create_session(response, 1)
 

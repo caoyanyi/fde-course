@@ -16,8 +16,8 @@ class Settings:
     private_host_allowlist: tuple[str, ...] = field(default_factory=lambda: tuple(
         host.strip().lower() for host in os.getenv("AI_PRIVATE_HOST_ALLOWLIST", "").split(",") if host.strip()
     ))
-    max_reviews_per_day: int = field(default_factory=lambda: int(os.getenv("MAX_REVIEWS_PER_DAY", "30")))
-    max_materials_per_day: int = field(default_factory=lambda: int(os.getenv("MAX_MATERIALS_PER_DAY", "30")))
+    max_reviews_per_day: int = field(default_factory=lambda: int(os.getenv("MAX_REVIEWS_PER_DAY", "100")))
+    max_materials_per_day: int = field(default_factory=lambda: int(os.getenv("MAX_MATERIALS_PER_DAY", "100")))
     start_worker: bool = True
     session_days: int = 7
 

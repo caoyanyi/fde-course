@@ -55,8 +55,8 @@ def main() -> None:
         parser.error("现有 APP_MASTER_KEY 太短。请确认是否已有加密数据后手动处理；本脚本不会覆盖密钥。")
     values["WEB_PORT"] = str(port)
     values.setdefault("BIND_ADDRESS", "127.0.0.1")
-    values.setdefault("MAX_REVIEWS_PER_DAY", "30")
-    values.setdefault("MAX_MATERIALS_PER_DAY", "30")
+    values.setdefault("MAX_REVIEWS_PER_DAY", "100")
+    values.setdefault("MAX_MATERIALS_PER_DAY", "100")
     values.setdefault("AI_PRIVATE_HOST_ALLOWLIST", "")
     if args.domain:
         values["PUBLIC_ORIGIN"] = f"https://{args.domain}"

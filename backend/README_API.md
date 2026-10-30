@@ -13,8 +13,8 @@ Python 3.12，FastAPI，SQLite。启动目录为 `backend`，入口为 `uvicorn 
 | `PUBLIC_ORIGIN` | 生产设为 `https://你的域名`；为空时按请求 Host 核对 Origin，适配保留 Host 的本地代理 |
 | `SESSION_COOKIE_SECURE` | `true`；仅本地 HTTP 调试时设 `false` |
 | `AI_PRIVATE_HOST_ALLOWLIST` | 默认空；逗号分隔的精确 hostname，只有显式列入的主机可访问私网/HTTP |
-| `MAX_REVIEWS_PER_DAY` | 全站 `30`，UTC 日历日计数，失败请求也计入以约束费用 |
-| `MAX_MATERIALS_PER_DAY` | 全站 `30`，与评审独立计数 |
+| `MAX_REVIEWS_PER_DAY` | 全站 `100`，UTC 日历日计数，失败请求也计入以约束费用 |
+| `MAX_MATERIALS_PER_DAY` | 全站 `100`，与评审独立计数 |
 
 `APP_MASTER_KEY`/自动生成的 master.key 必须随数据备份，否则保存的第三方密钥不能解密。数据库支持多个账号，进度、提交、附件、评审及素材均按用户隔离。管理员页面只显示账号及计数摘要，管理员的课程页面也只显示自己的学习数据。SQLite 使用 WAL；备份须使用 SQLite backup API 或停止应用后复制完整数据目录。
 
@@ -44,14 +44,16 @@ Python 3.12，FastAPI，SQLite。启动目录为 `backend`，入口为 `uvicorn 
 以下接口仅管理员可用，所有写请求同时需要 CSRF：
 
 - `GET /api/admin/users`：`{items:[User]}`，每个 User 额外含 `submission_count`、`completed_tasks`，不返回密码哈希。
-- `POST /api/admin/users`：`{username,password,display_name?,role?,review_daily_limit?,material_daily_limit?}`，成功 201。role 为 `admin|learner`、默认 learner。新账号默认评审额度 10 次/日、素材额度 5 次/日；初始密码必须修改。
+- `POST /api/admin/users`：`{username,password,display_name?,role?,review_daily_limit?,material_daily_limit?}`，成功 201。role 为 `admin|learner`、默认 learner。新账号默认评审额度 100 次/日、素材额度 100 次/日；初始密码必须修改。
 - `PATCH /api/admin/users/{id}`：可改 `display_name`、`role`、`is_active`、两类额度（整数 0–1000）。额度 0 表示暂停该类新调用。仅实际变更角色/状态时撤销会话。
 - `POST /api/admin/users/{id}/password`：`{new_password}`，重置后撤销所有会话并要求改密。管理员修改自己的密码使用普通改密接口。
 - 禁止停用自己或撤销自己的管理员角色，至少保留一位启用管理员。停用后无法登录；重新启用不会恢复旧会话。
 
 `GET /api/usage` 所有完成改密的用户可用，返回 `{reviews:{used,limit,global_remaining},materials:{used,limit,global_remaining},day_timezone:"UTC"}`。按 UTC 00:00（北京时间 08:00）重置，失败任务也计数。同一个仍排队/执行的任务去重不重复计数。每次入队在同一数据库事务中检查用户与全站额度，旧 `MAX_REVIEWS_PER_DAY` 仍表示全站上限。
 
-首个初始化管理员与 v1 迁移账号默认两类用户额度为 30。管理操作写入 `admin_audit`，不记录明文密码或 API key。
+首个初始化管理员与 v1 迁移账号默认两类用户额度为 100。管理操作写入 `admin_audit`，不记录明文密码或 API key。
+
+已迁移账号和已有环境变量中的明确额度不会在启动时被默认值覆盖。部署者可运行 `python3 scripts/set_daily_limits.py --limit 100`，将两个全站环境变量和原管理员（ID 为 1）的两类用户额度设为 100；也可用 `--username 用户名` 指定账号，或显式使用 `--all-users`。脚本要求已有 v1.1 数据库，不执行迁移、不清空当日使用计数，并保留其他 `.env` 内容及密钥。随后执行 `docker compose up -d`，使新的全站环境变量生效。
 
 ## v1 数据升级
 

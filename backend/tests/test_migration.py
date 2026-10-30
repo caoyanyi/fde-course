@@ -55,7 +55,8 @@ def test_v1_upgrade_preserves_all_records_and_is_idempotent(tmp_path):
     with db.connect() as c:
         user = dict(c.execute('SELECT * FROM users').fetchone())
         assert user['role'] == 'admin' and user['username'] == 'owner'
-        assert user['must_change_password'] == 0 and user['review_daily_limit'] == 30
+        assert user['must_change_password'] == 0
+        assert user['review_daily_limit'] == user['material_daily_limit'] == 100
         assert c.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert c.execute('PRAGMA foreign_key_check').fetchall() == []
         assert c.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] == 0
@@ -68,7 +69,9 @@ def test_v1_upgrade_preserves_all_records_and_is_idempotent(tmp_path):
         ai = dict(c.execute('SELECT * FROM ai_settings').fetchone())
         assert ai['api_key_cipher'] == 'original-cipher' and ai['material_max_tokens'] == 6000
         c.execute("INSERT INTO users(username,password_hash,created_at) VALUES('new-user','hash','2026-01-02')")
-        assert c.execute("SELECT id FROM users WHERE username='new-user'").fetchone()[0] == 2
+        new_user = c.execute("SELECT * FROM users WHERE username='new-user'").fetchone()
+        assert new_user['id'] == 2
+        assert new_user['review_daily_limit'] == new_user['material_daily_limit'] == 100
         c.execute("INSERT INTO progress VALUES(2,'w01-t01','in_progress',1,'new','now')")
         c.execute("INSERT INTO submissions(id,user_id,task_id,version,content,evidence_notes,created_at,static_checks,course_version,task_snapshot) VALUES('new-sub',2,'w01-t01',3,'new','','now','[]','v1','{}')")
     assert (db.path.parent/'uploads'/'old.data').read_text() == '原附件'

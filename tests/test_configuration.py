@@ -32,6 +32,8 @@ def test_new_config_is_private_and_origin_changes_preserve_keys(tmp_path):
     first = env(tmp_path / ".env")
     assert len(first["APP_MASTER_KEY"]) >= 32
     assert first["SESSION_COOKIE_SECURE"] == "true"
+    assert first["MAX_REVIEWS_PER_DAY"] == "100"
+    assert first["MAX_MATERIALS_PER_DAY"] == "100"
     assert stat.S_IMODE((tmp_path / ".env").stat().st_mode) == 0o600
     assert first["APP_MASTER_KEY"] not in result.stdout
     assert first["APP_SETUP_TOKEN"] not in result.stdout
@@ -41,6 +43,22 @@ def test_new_config_is_private_and_origin_changes_preserve_keys(tmp_path):
     assert second["APP_SETUP_TOKEN"] == first["APP_SETUP_TOKEN"]
     assert second["PUBLIC_ORIGIN"] == "https://new.example.com"
     assert second["WEB_PORT"] == "18081"
+
+
+def test_reconfigure_preserves_explicit_daily_limits(tmp_path):
+    script = sandbox(tmp_path)
+    assert run(script, "--domain", "learn.example.com").returncode == 0
+    config_path = tmp_path / ".env"
+    original = config_path.read_text()
+    config_path.write_text(original.replace("MAX_REVIEWS_PER_DAY=100", "MAX_REVIEWS_PER_DAY=30").replace(
+        "MAX_MATERIALS_PER_DAY=100", "MAX_MATERIALS_PER_DAY=17",
+    ))
+
+    assert run(script, "--domain", "new.example.com").returncode == 0
+    current = env(config_path)
+    assert current["PUBLIC_ORIGIN"] == "https://new.example.com"
+    assert current["MAX_REVIEWS_PER_DAY"] == "30"
+    assert current["MAX_MATERIALS_PER_DAY"] == "17"
 
 
 def test_invalid_domain_or_port_does_not_create_config(tmp_path):

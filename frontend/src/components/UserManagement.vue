@@ -12,8 +12,8 @@ const success = ref('')
 const editingId = ref<number | null>(null)
 const resetId = ref<number | null>(null)
 const resetPassword = ref('')
-const form = reactive({ username: '', password: '', display_name: '', role: 'learner' as User['role'], review_daily_limit: 10, material_daily_limit: 5 })
-const edit = reactive({ display_name: '', role: 'learner' as User['role'], is_active: true, review_daily_limit: 10, material_daily_limit: 5 })
+const form = reactive({ username: '', password: '', display_name: '', role: 'learner' as User['role'], review_daily_limit: 100, material_daily_limit: 100 })
+const edit = reactive({ display_name: '', role: 'learner' as User['role'], is_active: true, review_daily_limit: 100, material_daily_limit: 100 })
 async function load() { loading.value = true; error.value = ''; try { users.value = (await api<{ items: User[] }>('/admin/users')).items } catch (e) { error.value = errorMessage(e) } finally { loading.value = false } }
 async function create() {
   busy.value = true; error.value = ''; success.value = ''

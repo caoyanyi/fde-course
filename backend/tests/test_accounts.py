@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import Settings
 from app.security import COOKIE_NAME
 from .test_system import submit, good_report
 
@@ -34,8 +35,14 @@ def learner_factory(app, logged_in):
 
 
 def test_first_admin_new_account_password_gate_and_permissions(logged_in, learner_factory):
-    assert logged_in.get('/api/auth/status').json()['user']['role'] == 'admin'
+    admin=logged_in.get('/api/auth/status').json()['user']
+    assert admin['role'] == 'admin'
+    assert admin['review_daily_limit'] == admin['material_daily_limit'] == 100
+    usage=logged_in.get('/api/usage').json()
+    assert usage['reviews']['limit'] == usage['reviews']['global_remaining'] == 100
+    assert usage['materials']['limit'] == usage['materials']['global_remaining'] == 100
     learner,user=learner_factory(finish=False)
+    assert user['review_daily_limit'] == user['material_daily_limit'] == 100
     assert user['must_change_password'] is True
     assert learner.get('/api/course').status_code == 403
     assert learner.get('/api/admin/users').status_code == 403
@@ -50,6 +57,37 @@ def test_first_admin_new_account_password_gate_and_permissions(logged_in, learne
     assert learner.post('/api/admin/users/1/password',json={'new_password':INITIAL}).status_code == 403
     assert learner.put('/api/settings/ai',json={'base_url':'https://example.com/v1','model':'test'}).status_code == 403
     assert learner.post('/api/settings/ai/test').status_code == 403
+
+
+def test_reinitializing_database_preserves_explicit_account_limits(logged_in, learner_factory, app):
+    learner,user=learner_factory(review_daily_limit=0,material_daily_limit=9)
+    updated=logged_in.patch('/api/admin/users/1',json={'review_daily_limit':30,'material_daily_limit':17})
+    assert updated.status_code == 200
+
+    # Deploying new defaults must not silently change an existing admin's limits
+    # or re-enable a learner's explicitly disabled review quota.
+    app.state.db.initialize()
+    for client,expected in [(logged_in,(30,17)),(learner,(0,9))]:
+        status=client.get('/api/auth/status')
+        assert status.status_code == 200
+        current=status.json()['user']
+        assert (current['review_daily_limit'],current['material_daily_limit']) == expected
+        usage=client.get('/api/usage').json()
+        assert (usage['reviews']['limit'],usage['materials']['limit']) == expected
+        assert usage['reviews']['global_remaining'] == usage['materials']['global_remaining'] == 100
+
+
+def test_global_quota_defaults_and_explicit_environment(monkeypatch):
+    monkeypatch.delenv('MAX_REVIEWS_PER_DAY',raising=False)
+    monkeypatch.delenv('MAX_MATERIALS_PER_DAY',raising=False)
+    defaults=Settings()
+    assert defaults.max_reviews_per_day == defaults.max_materials_per_day == 100
+
+    monkeypatch.setenv('MAX_REVIEWS_PER_DAY','30')
+    monkeypatch.setenv('MAX_MATERIALS_PER_DAY','17')
+    configured=Settings()
+    assert configured.max_reviews_per_day == 30
+    assert configured.max_materials_per_day == 17
 
 
 def test_progress_submissions_files_and_reviews_are_private(configured, learner_factory):
@@ -132,7 +170,7 @@ def test_user_and_global_review_quotas_remain_separate(configured, learner_facto
     assert learner.post(f"/api/submissions/{own['id']}/reviews",json={'consent':True}).status_code == 429
     usage=learner.get('/api/usage').json()
     assert usage['reviews']['used'] == usage['reviews']['limit'] == 1
-    assert usage['reviews']['global_remaining'] == 29
+    assert usage['reviews']['global_remaining'] == 99
     assert usage['materials']['used'] == 0
     admin_sub=submit(configured)
     app.state.config.max_reviews_per_day=1

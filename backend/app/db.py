@@ -24,8 +24,8 @@ USERS_SQL = """CREATE TABLE {name} (
     display_name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'learner' CHECK(role IN ('admin','learner')),
     is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
     must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0,1)),
-    review_daily_limit INTEGER NOT NULL DEFAULT 10 CHECK(review_daily_limit >= 0),
-    material_daily_limit INTEGER NOT NULL DEFAULT 5 CHECK(material_daily_limit >= 0)
+    review_daily_limit INTEGER NOT NULL DEFAULT 100 CHECK(review_daily_limit >= 0),
+    material_daily_limit INTEGER NOT NULL DEFAULT 100 CHECK(material_daily_limit >= 0)
 )"""
 PROGRESS_SQL = """CREATE TABLE {name} (
     user_id INTEGER NOT NULL REFERENCES users(id), task_id TEXT NOT NULL,
@@ -119,7 +119,7 @@ class Database:
             conn.execute(USERS_SQL.format(name="users_v2"))
             conn.execute(PROGRESS_SQL.format(name="progress_v2"))
             conn.execute(SUBMISSIONS_SQL.format(name="submissions_v2"))
-            conn.execute("INSERT INTO users_v2(id,username,password_hash,created_at,display_name,role,review_daily_limit,material_daily_limit) SELECT id,username,password_hash,created_at,username,'admin',30,30 FROM users")
+            conn.execute("INSERT INTO users_v2(id,username,password_hash,created_at,display_name,role,review_daily_limit,material_daily_limit) SELECT id,username,password_hash,created_at,username,'admin',100,100 FROM users")
             conn.execute("INSERT INTO progress_v2(user_id,task_id,status,actual_hours,notes,updated_at) SELECT 1,task_id,status,actual_hours,notes,updated_at FROM progress")
             conn.execute("INSERT INTO submissions_v2(id,user_id,task_id,version,content,evidence_notes,created_at,static_checks,course_version,task_snapshot) SELECT id,1,task_id,version,content,evidence_notes,created_at,static_checks,course_version,task_snapshot FROM submissions")
             for name in ("users", "progress", "submissions"):
