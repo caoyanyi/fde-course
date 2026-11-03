@@ -128,6 +128,29 @@ def test_settings_never_expose_key_and_encrypt_at_rest(configured, app):
     assert saved.json()["api_key_set"] is False
 
 
+def test_new_ai_settings_default_to_unlimited_generation_wait(logged_in):
+    assert logged_in.get("/api/settings/ai").json()["timeout_seconds"] == 0
+
+
+@pytest.mark.parametrize("seconds", [0, 1, 10, 90, 300, 600])
+def test_ai_timeout_accepts_long_generations_without_changing_other_settings(configured, app, seconds):
+    before = configured.get("/api/settings/ai").json()
+    saved = configured.put("/api/settings/ai", json={**before, "timeout_seconds": seconds})
+    assert saved.status_code == 200, saved.text
+    assert saved.json() == {**before, "timeout_seconds": seconds}
+    with app.state.db.connect() as conn:
+        cipher = conn.execute("SELECT api_key_cipher FROM ai_settings WHERE id=1").fetchone()[0]
+        assert app.state.cipher.decrypt(cipher.encode()).decode() == "sk-unit-test-not-a-real-key"
+
+
+@pytest.mark.parametrize("seconds", [-1, 601])
+def test_ai_timeout_rejects_out_of_range_without_overwriting_saved_value(configured, seconds):
+    before = configured.get("/api/settings/ai").json()
+    result = configured.put("/api/settings/ai", json={**before, "timeout_seconds": seconds})
+    assert result.status_code == 422
+    assert configured.get("/api/settings/ai").json() == before
+
+
 @pytest.mark.parametrize("url", ["http://public.example/v1", "https://user:password@public.example/v1", "https://public.example/v1?token=secret", "https://public.example/v1#fragment"])
 def test_unsafe_provider_url_rejected(url):
     with pytest.raises(ProviderError):

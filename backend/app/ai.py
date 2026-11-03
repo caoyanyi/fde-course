@@ -101,8 +101,19 @@ class PinnedHTTPConnection(http.client.HTTPConnection):
 
 def chat_completion(provider: dict, api_key: str, messages: list[dict], settings: Settings, *, test: bool = False) -> tuple[str, dict | None]:
     endpoint = resolve_endpoint(provider["base_url"], settings)
-    seconds = min(provider["timeout_seconds"], 25) if test else provider["timeout_seconds"]
-    deadline = time.monotonic() + seconds
+    # Zero disables the generation deadline. Connection tests remain short even
+    # when background jobs are allowed to wait indefinitely.
+    seconds = min(provider["timeout_seconds"] or 25, 25) if test else provider["timeout_seconds"]
+    deadline = time.monotonic() + seconds if seconds else None
+
+    def remaining_timeout() -> float | None:
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        return remaining
+
     payload = json.dumps({
         "model": provider["model"],
         "messages": messages,
@@ -115,11 +126,9 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
         # Trying a second address after connect failure is safe: no request was sent.
         # Never retry after sending the request, because that could duplicate cost.
         for address in endpoint.addresses[:3]:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError()
+            remaining = remaining_timeout()
             constructor = PinnedHTTPSConnection if endpoint.tls else PinnedHTTPConnection
-            candidate = constructor(endpoint, address, min(10, remaining))
+            candidate = constructor(endpoint, address, min(10, remaining) if remaining is not None else 10)
             try:
                 candidate.connect()
                 connection = candidate
@@ -128,7 +137,7 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
                 candidate.close()
         if connection is None:
             raise ProviderError("无法建立模型服务连接；请检查地址、TLS 证书和服务器出站网络")
-        connection.sock.settimeout(max(0.1, deadline - time.monotonic()))
+        connection.sock.settimeout(remaining_timeout())
         connection.request("POST", endpoint.path, body=payload, headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -153,9 +162,7 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
         chunks = []
         total = 0
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError()
+            remaining = remaining_timeout()
             if connection.sock is not None:
                 connection.sock.settimeout(remaining)
             piece = response.read1(min(65_536, MAX_PROVIDER_RESPONSE + 1 - total))
@@ -164,7 +171,7 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
             chunks.append(piece)
             total += len(piece)
             if total > MAX_PROVIDER_RESPONSE:
-                raise ProviderError("模型响应超过 1 MiB，评审已停止")
+                raise ProviderError("模型响应超过 1 MiB，本次请求已停止")
         try:
             result = json.loads(b"".join(chunks))
             content = result["choices"][0]["message"]["content"]
@@ -182,9 +189,11 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
             normalized_usage = {key: value for key, value in normalized_usage.items() if isinstance(value, int) and not isinstance(value, bool) and value >= 0}
         return content, normalized_usage
     except (TimeoutError, socket.timeout) as exc:
-        raise ProviderError("模型请求超时；没有生成分数。可检查服务状态后手动重试（原请求可能已产生服务方费用）") from exc
+        limit = f"（等待上限 {seconds:g} 秒）" if seconds else ""
+        action = "请检查服务状态后手动重试" if test or not seconds else "可检查服务状态或在模型设置中调整超时后手动重试"
+        raise ProviderError(f"模型请求超时{limit}；未保存本次结果。{action}（原请求可能已产生服务方费用）") from exc
     except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
-        raise ProviderError("模型请求网络中断；没有生成分数，请检查连接后手动重试") from exc
+        raise ProviderError("模型请求网络中断；未保存本次结果，请检查连接后手动重试（原请求可能已产生服务方费用）") from exc
     finally:
         if connection is not None:
             connection.close()

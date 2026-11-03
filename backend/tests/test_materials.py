@@ -218,6 +218,42 @@ def test_failed_output_saves_no_files_and_counts_quota(configured, app, monkeypa
     assert configured.get("/api/usage").json()["materials"]["used"] == 1
 
 
+def test_timeout_keeps_failed_version_and_uses_new_limit_only_for_manual_retry(configured, app, monkeypatch):
+    settings = configured.get("/api/settings/ai").json()
+    saved = configured.put("/api/settings/ai", json={**settings, "timeout_seconds": 90})
+    assert saved.status_code == 200
+    first_id = request_material(configured)
+    calls = []
+
+    def timeout(provider, *args):
+        calls.append(provider["timeout_seconds"])
+        raise ProviderError("模型请求超时（等待上限 90 秒）；原请求可能已产生服务方费用")
+
+    monkeypatch.setattr("app.materials.chat_completion", timeout)
+    assert app.state.material_worker.process_next()
+    failed = configured.get(f"/api/materials/{first_id}").json()
+    assert failed["status"] == "failed" and failed["files"] == []
+
+    saved = configured.put("/api/settings/ai", json={**settings, "timeout_seconds": 0})
+    assert saved.status_code == 200
+    assert app.state.material_worker.process_next() is False
+    assert calls == [90]
+    assert configured.get(f"/api/materials/{first_id}").json() == failed
+
+    def success(provider, *args):
+        calls.append(provider["timeout_seconds"])
+        return json.dumps(package()), None
+
+    monkeypatch.setattr("app.materials.chat_completion", success)
+    second_id = request_material(configured)
+    assert second_id != first_id
+    assert app.state.material_worker.process_next()
+    completed = configured.get(f"/api/materials/{second_id}").json()
+    assert completed["status"] == "completed" and completed["version"] == 2
+    assert calls == [90, 0]
+    assert configured.get(f"/api/materials/{first_id}").json() == failed
+
+
 def test_global_material_quota_and_user_zero_quota(configured, app):
     app.state.config.max_materials_per_day = 0
     assert configured.post("/api/tasks/w01-t01/materials", json=request_payload()).status_code == 429

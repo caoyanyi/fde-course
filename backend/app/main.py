@@ -112,7 +112,7 @@ class AISettingsUpdate(BaseModel):
     clear_api_key: bool = False
     max_tokens: int = Field(default=3000, ge=256, le=8192)
     material_max_tokens: int = Field(default=6000, ge=256, le=8192)
-    timeout_seconds: int = Field(default=90, ge=10, le=180)
+    timeout_seconds: int = Field(default=0, ge=0, le=600)
     temperature: float = Field(default=0.2, ge=0, le=1, allow_inf_nan=False)
 
 
@@ -183,7 +183,7 @@ def user_public(row) -> dict:
 
 def settings_public(row, can_manage: bool = True) -> dict:
     if row is None:
-        result = {"provider_label": "自定义模型服务", "base_url": "", "model": "", "api_key_set": False, "max_tokens": 3000, "material_max_tokens": 6000, "timeout_seconds": 90, "temperature": 0.2}
+        result = {"provider_label": "自定义模型服务", "base_url": "", "model": "", "api_key_set": False, "max_tokens": 3000, "material_max_tokens": 6000, "timeout_seconds": 0, "temperature": 0.2}
     else:
         result = {key: row[key] for key in ("provider_label", "base_url", "model", "max_tokens", "material_max_tokens", "timeout_seconds", "temperature")} | {"api_key_set": bool(row["api_key_cipher"])}
     if not can_manage:

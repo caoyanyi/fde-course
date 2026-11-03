@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -10,7 +11,7 @@ from app.config import Settings
 
 
 @contextmanager
-def mock_provider(status=200, payload=None, headers=None):
+def mock_provider(status=200, payload=None, headers=None, response_delay=0, body_delay=0):
     received = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -21,6 +22,7 @@ def mock_provider(status=200, payload=None, headers=None):
         def do_POST(self):
             body = self.rfile.read(int(self.headers["Content-Length"]))
             received.append({"path": self.path, "authorization": self.headers.get("Authorization"), "body": json.loads(body)})
+            time.sleep(response_delay)
             response_body = json.dumps(payload if payload is not None else {
                 "choices": [{"message": {"content": "已收到中文证据"}}],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 7},
@@ -34,7 +36,11 @@ def mock_provider(status=200, payload=None, headers=None):
                 self.send_header(key, value)
             self.end_headers()
             try:
-                self.wfile.write(response_body)
+                middle = len(response_body) // 2
+                self.wfile.write(response_body[:middle])
+                self.wfile.flush()
+                time.sleep(body_delay)
+                self.wfile.write(response_body[middle:])
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
@@ -87,3 +93,60 @@ def test_real_transport_rejects_oversize_and_invalid_choices():
     with mock_provider(payload={"choices": []}) as (provider, _):
         with pytest.raises(ProviderError, match="兼容"):
             chat_completion(provider, "test-key", [{"role": "user", "content": "中文"}], SETTINGS)
+
+
+def test_timeout_reports_wait_limit_without_scoring_language_or_retry():
+    with mock_provider(response_delay=0.2) as (provider, received):
+        provider["timeout_seconds"] = 0.05
+        with pytest.raises(ProviderError, match="超时") as error:
+            chat_completion(provider, "secret-test-value", [{"role": "user", "content": "素材请求"}], SETTINGS)
+    message = str(error.value)
+    assert "0.05 秒" in message
+    assert "分数" not in message
+    assert "服务方费用" in message
+    assert "secret-test-value" not in message
+    assert len(received) == 1
+
+
+def test_zero_timeout_waits_for_slow_headers_and_body_without_retry(monkeypatch):
+    from app.ai import PinnedHTTPConnection
+
+    observed = {}
+
+    class TrackingConnection(PinnedHTTPConnection):
+        def connect(self):
+            observed["connect_timeout"] = self.timeout
+            super().connect()
+
+        def getresponse(self):
+            observed["response_timeout"] = self.sock.gettimeout()
+            return super().getresponse()
+
+    monkeypatch.setattr("app.ai.PinnedHTTPConnection", TrackingConnection)
+    with mock_provider(response_delay=0.1, body_delay=0.1) as (provider, received):
+        provider["timeout_seconds"] = 0
+        content, usage = chat_completion(provider, "test-key", [{"role": "user", "content": "长素材"}], SETTINGS)
+    assert content == "已收到中文证据"
+    assert usage == {"input_tokens": 12, "output_tokens": 7}
+    assert observed == {"connect_timeout": 10, "response_timeout": None}
+    assert len(received) == 1
+
+
+@pytest.mark.parametrize("seconds,expected_limit", [(0, 25), (10, 10), (600, 25)])
+def test_connection_test_stays_bounded_when_generation_wait_is_unlimited(monkeypatch, seconds, expected_limit):
+    from app.ai import PinnedHTTPConnection
+
+    observed = []
+
+    class TimeoutConnection(PinnedHTTPConnection):
+        def getresponse(self):
+            observed.append(self.sock.gettimeout())
+            raise TimeoutError()
+
+    monkeypatch.setattr("app.ai.PinnedHTTPConnection", TimeoutConnection)
+    with mock_provider() as (provider, _):
+        provider["timeout_seconds"] = seconds
+        with pytest.raises(ProviderError, match=f"{expected_limit} 秒"):
+            chat_completion(provider, "test-key", [{"role": "user", "content": "OK"}], SETTINGS, test=True)
+    assert len(observed) == 1
+    assert 0 < observed[0] <= expected_limit
