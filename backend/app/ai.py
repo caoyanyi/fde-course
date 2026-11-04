@@ -4,11 +4,13 @@ import http.client
 import ipaddress
 import json
 import math
+import re
 import socket
 import ssl
 import threading
 import time
 from dataclasses import dataclass
+from itertools import chain
 from urllib.parse import urlsplit
 
 from cryptography.fernet import InvalidToken
@@ -18,6 +20,8 @@ from .db import Database, encode, now
 
 
 MAX_PROVIDER_RESPONSE = 1024 * 1024
+MAX_PROVIDER_STREAM_RESPONSE = 16 * MAX_PROVIDER_RESPONSE
+SSE_LINE_ENDING = re.compile(br"\r\n|\r|\n")
 MAX_EVIDENCE_CHARS = 90_000
 PROMPT_VERSION = "fde-static-review-1.1"
 VERIFICATION_NOTE = "这是 AI 对所提供文本证据的建议评分。系统没有运行代码、访问演示链接、执行测试或确认生产环境表现；运行验收需要人工核对或独立的受控执行环境。"
@@ -99,6 +103,97 @@ class PinnedHTTPConnection(http.client.HTTPConnection):
         self.sock = socket.create_connection((self.address, self.port), self.timeout)
 
 
+def _normalized_usage(usage) -> dict | None:
+    if not isinstance(usage, dict):
+        return None
+    values = {"input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens")}
+    return {key: value for key, value in values.items() if isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+
+
+def _check_finish_reason(reason):
+    if reason == "length":
+        raise ProviderError("模型输出因 Token 上限被截断，未保存结果；请调整输出预算或生成范围后手动重试")
+    if reason == "content_filter":
+        raise ProviderError("模型输出被服务商内容过滤，未保存结果；请检查生成要求后手动重试")
+    if reason not in (None, "stop"):
+        raise ProviderError("模型没有返回完整文本结果，未保存本次结果")
+
+
+def _sse_events(chunks):
+    """Parse bounded SSE events without decoding incomplete UTF-8 characters."""
+    buffer, data, event, size = b"", [], b"", 0
+    first_line = True
+    for piece in chain(chunks, (b"\n\n",)):
+        buffer += piece
+        while match := SSE_LINE_ENDING.search(buffer):
+            if match.group() == b"\r" and match.end() == len(buffer):
+                break  # A CRLF delimiter can be split between network reads.
+            line, buffer = buffer[:match.start()], buffer[match.end():]
+            if first_line:
+                line = line.removeprefix(b"\xef\xbb\xbf")
+                first_line = False
+            if not line:
+                if data or event == b"error":
+                    yield event, b"\n".join(data)
+                data, event, size = [], b"", 0
+                continue
+            size += len(line)
+            if size > MAX_PROVIDER_RESPONSE:
+                raise ProviderError("模型流式事件过大，本次请求已停止")
+            field, _, value = line.partition(b":")
+            if value.startswith(b" "):
+                value = value[1:]
+            if field == b"data":
+                data.append(value)
+            elif field == b"event":
+                event = value
+        if len(buffer) > MAX_PROVIDER_RESPONSE:
+            raise ProviderError("模型流式事件过大，本次请求已停止")
+
+
+def _stream_completion(chunks) -> tuple[str, dict | None]:
+    parts, size, usage = [], 0, None
+    for event, data in _sse_events(chunks):
+        if event == b"error":
+            raise ProviderError("模型流式响应返回错误，未保存结果；请检查服务状态后手动重试（原请求可能已产生服务方费用）")
+        if data.strip() == b"[DONE]":
+            content = "".join(parts)
+            if not content.strip():
+                raise ProviderError("模型流式响应没有返回有效文本")
+            return content, usage
+        try:
+            chunk = json.loads(data)
+            if not isinstance(chunk, dict):
+                raise ValueError()
+            if chunk.get("error") is not None:
+                raise ProviderError("模型流式响应返回错误，未保存结果；请检查服务状态后手动重试（原请求可能已产生服务方费用）")
+            if chunk.get("usage") is not None:
+                usage = _normalized_usage(chunk["usage"])
+            choices = chunk["choices"]
+            if not isinstance(choices, list):
+                raise ValueError()
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    raise ValueError()
+                if choice.get("index", 0) != 0:
+                    continue
+                _check_finish_reason(choice.get("finish_reason"))
+                delta = choice["delta"]
+                if not isinstance(delta, dict):
+                    raise ValueError()
+                text = delta.get("content")
+                if text is not None:
+                    if not isinstance(text, str):
+                        raise ValueError()
+                    size += len(text.encode("utf-8"))
+                    if size > MAX_PROVIDER_RESPONSE:
+                        raise ProviderError("模型文本响应超过 1 MiB，本次请求已停止")
+                    parts.append(text)
+        except (ValueError, KeyError, TypeError, RecursionError) as exc:
+            raise ProviderError("模型流式响应格式无效，未保存本次结果") from exc
+    raise ProviderError("模型流式响应中断，未收到结束标记；未保存半成品，请手动重试（原请求可能已产生服务方费用）")
+
+
 def chat_completion(provider: dict, api_key: str, messages: list[dict], settings: Settings, *, test: bool = False) -> tuple[str, dict | None]:
     endpoint = resolve_endpoint(provider["base_url"], settings)
     # Zero disables the generation deadline. Connection tests remain short even
@@ -114,14 +209,16 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
             raise TimeoutError()
         return remaining
 
+    stream = settings.ai_stream_responses and not test
     payload = json.dumps({
         "model": provider["model"],
         "messages": messages,
         "temperature": provider["temperature"],
         "max_tokens": min(provider["max_tokens"], 32) if test else provider["max_tokens"],
-        "stream": False,
+        "stream": stream,
     }, ensure_ascii=False).encode("utf-8")
     connection = None
+    response = None
     try:
         # Trying a second address after connect failure is safe: no request was sent.
         # Never retry after sending the request, because that could duplicate cost.
@@ -138,9 +235,10 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
         if connection is None:
             raise ProviderError("无法建立模型服务连接；请检查地址、TLS 证书和服务器出站网络")
         connection.sock.settimeout(remaining_timeout())
+        response_socket = connection.sock
         connection.request("POST", endpoint.path, body=payload, headers={
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "text/event-stream, application/json" if stream else "application/json",
             "Accept-Encoding": "identity",
             "Authorization": f"Bearer {api_key}",
             "User-Agent": "FDE-Learning-System/1.1",
@@ -152,42 +250,42 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
             raise ProviderError("模型服务拒绝认证或权限不足，请检查 API Key 与模型访问权限")
         if response.status == 429:
             raise ProviderError("模型服务限流或额度不足，请检查余额与频率后手动重试")
+        if response.status in (504, 524):
+            raise ProviderError(f"模型上游网关超时（HTTP {response.status}）；本地不限时无法延长服务商网关时限。请联系服务商检查流式响应或网关配置后手动重试（原请求可能已产生服务方费用）")
+        if response.status in (502, 503):
+            raise ProviderError(f"模型上游服务暂时不可用（HTTP {response.status}）；请检查服务状态后手动重试（原请求可能已产生服务方费用）")
         if response.status < 200 or response.status >= 300:
             raise ProviderError(f"模型服务返回 HTTP {response.status}，请核对模型名与兼容接口配置后重试")
+        is_sse = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower() == "text/event-stream"
+        max_bytes = MAX_PROVIDER_STREAM_RESPONSE if is_sse else MAX_PROVIDER_RESPONSE
         content_length = response.getheader("Content-Length")
-        if content_length and (not content_length.isdigit() or int(content_length) > MAX_PROVIDER_RESPONSE):
+        if content_length and (not content_length.isdigit() or int(content_length) > max_bytes):
             raise ProviderError("模型响应体过大或长度无效")
         if response.getheader("Content-Encoding", "identity").lower() not in ("", "identity"):
             raise ProviderError("模型服务返回了不支持的压缩响应")
-        chunks = []
-        total = 0
-        while True:
-            remaining = remaining_timeout()
-            if connection.sock is not None:
-                connection.sock.settimeout(remaining)
-            piece = response.read1(min(65_536, MAX_PROVIDER_RESPONSE + 1 - total))
-            if not piece:
-                break
-            chunks.append(piece)
-            total += len(piece)
-            if total > MAX_PROVIDER_RESPONSE:
-                raise ProviderError("模型响应超过 1 MiB，本次请求已停止")
+        def read_chunks():
+            total = 0
+            while not response.isclosed():
+                response_socket.settimeout(remaining_timeout())
+                piece = response.read1(min(65_536, max_bytes + 1 - total))
+                if not piece:
+                    return
+                total += len(piece)
+                if total > max_bytes:
+                    raise ProviderError("模型响应体过大，本次请求已停止")
+                yield piece
+
+        if is_sse:
+            return _stream_completion(read_chunks())
         try:
-            result = json.loads(b"".join(chunks))
+            result = json.loads(b"".join(read_chunks()))
             content = result["choices"][0]["message"]["content"]
+            _check_finish_reason(result["choices"][0].get("finish_reason"))
             if not isinstance(content, str) or not content.strip():
                 raise ValueError()
-        except (ValueError, KeyError, TypeError, IndexError) as exc:
+        except (ValueError, KeyError, TypeError, IndexError, RecursionError) as exc:
             raise ProviderError("服务没有返回兼容的文本 completion；请确认支持 chat/completions 接口") from exc
-        usage = result.get("usage")
-        normalized_usage = None
-        if isinstance(usage, dict):
-            normalized_usage = {
-                "input_tokens": usage.get("prompt_tokens"),
-                "output_tokens": usage.get("completion_tokens"),
-            }
-            normalized_usage = {key: value for key, value in normalized_usage.items() if isinstance(value, int) and not isinstance(value, bool) and value >= 0}
-        return content, normalized_usage
+        return content, _normalized_usage(result.get("usage"))
     except (TimeoutError, socket.timeout) as exc:
         limit = f"（等待上限 {seconds:g} 秒）" if seconds else ""
         action = "请检查服务状态后手动重试" if test or not seconds else "可检查服务状态或在模型设置中调整超时后手动重试"
@@ -195,6 +293,8 @@ def chat_completion(provider: dict, api_key: str, messages: list[dict], settings
     except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
         raise ProviderError("模型请求网络中断；未保存本次结果，请检查连接后手动重试（原请求可能已产生服务方费用）") from exc
     finally:
+        if response is not None:
+            response.close()
         if connection is not None:
             connection.close()
 

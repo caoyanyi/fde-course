@@ -13,6 +13,7 @@ class Settings:
     master_key: str = field(default_factory=lambda: os.getenv("APP_MASTER_KEY", ""))
     public_origin: str = field(default_factory=lambda: os.getenv("PUBLIC_ORIGIN", "").rstrip("/"))
     secure_cookie: bool = field(default_factory=lambda: os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true")
+    ai_stream_responses: bool = field(default_factory=lambda: os.getenv("AI_STREAM_RESPONSES", "true").lower() == "true")
     private_host_allowlist: tuple[str, ...] = field(default_factory=lambda: tuple(
         host.strip().lower() for host in os.getenv("AI_PRIVATE_HOST_ALLOWLIST", "").split(",") if host.strip()
     ))
